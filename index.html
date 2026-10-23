@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f5f6f2">
+  <meta name="description" content="交互理解 NVIDIA TMA im2col：卷积滑窗、展开矩阵、地址生成、多通道、padding、stride、dilation，以及 TMA 项目接入思路。">
+  <title>TMA im2col Lab · 把取数过程看明白</title>
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+  <script type="module" src="./app.mjs"></script>
+</head>
+<body>
+  <a class="skip" href="#lab">跳到交互实验</a>
+  <header class="site-header">
+    <a class="brand" href="#top" aria-label="TMA im2col Lab 首页"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>TMA <b>im2col</b> <small>LAB</small></span></a>
+    <nav aria-label="章节导航"><a href="#lab">动手看数据</a><a href="#meaning">读懂参数</a><a href="#project">接入项目</a><a href="#quiz">检验理解</a></nav>
+    <a class="source-link" href="https://github.com/andyzr-coder/tma-im2col-lab" target="_blank" rel="noreferrer">GitHub ↗</a>
+  </header>
+  <main id="top">
+    <section class="hero wrap">
+      <div class="hero-copy"><p class="eyebrow"><span></span> 从卷积概念，到硬件取数</p><h1>看懂 im2col，<br>从<span>一个输入坐标</span>开始。</h1><p class="hero-lead">移动窗口，切换核内偏移，看输入像素怎样变成矩阵的一部分。再沿着地址、读请求和写入路径，理解 TMA 要新增什么。</p><div class="hero-actions"><a class="button primary" href="#lab">开始交互实验 <span>↓</span></a><a class="text-link" href="#distinction">先分清：它和权重重排的区别 →</a></div><p class="hero-note">中文教学 · 可单步演示 · 所有计算在浏览器本地完成</p></div>
+      <div class="hero-diagram" aria-label="窗口基准位置加核内偏移，得到输入坐标"><div class="diagram-label">一笔数据，是这样找到的</div><div class="formula-piece"><span class="tiny-label">窗口基准</span><strong>(h₀, w₀)</strong><span class="operator">+</span></div><div class="formula-piece offset"><span class="tiny-label">核内偏移</span><strong>(Δh, Δw)</strong><span class="operator">↓</span></div><div class="formula-result"><span>实际输入坐标</span><strong>(h₀ + Δh, w₀ + Δw)</strong></div><div class="mini-path"><span>GMEM</span><i>→</i><span>TMA im2col</span><i>→</i><span>Shared</span></div><p>同一偏移，应用到一串窗口基准位置。</p></div>
+    </section>
+
+    <section id="distinction" class="distinction wrap section-anchor">
+      <div class="section-heading"><span class="section-no">00 / 先分清对象</span><h2>卷积的两侧，都要为矩阵乘法做准备。</h2><p>旧文档中的 weight packing 和 NVIDIA im2col，分别处理不同的输入。</p></div>
+      <div class="comparison"><article><span class="tag neutral">你熟悉的权重侧</span><h3>权重展开与打包</h3><p>把 OC、IC、KH、KW 组织成二维权重矩阵，再按硬件要求分块、对齐、重排。旧文档里的 64k1n 属于这一侧。</p><div class="shape-flow"><code>[OC, IC, KH, KW]</code><span>→</span><code>[OC, K]</code></div><small>通常保留每个权重元素；可能增加对齐填充。</small></article><article class="activation"><span class="tag green">这次要理解的输入侧</span><h3>输入滑窗展开</h3><p>根据每个输出位置，把卷积窗口需要的输入元素组织成矩阵。重叠窗口会引用同一个输入元素。</p><div class="shape-flow"><code>X[N, H, W, C]</code><span>→</span><code>A[M, K]</code></div><small>M = N×P×Q，K = R×S×C。这里 A 每行对应一个输出位置。</small></article></div>
+      <div class="equation-strip"><span>输入矩阵 <b>A[M,K]</b></span><span>×</span><span>权重矩阵 <b>B[K,OC]</b></span><span>=</span><span>输出 <b>Y[M,OC]</b></span></div>
+    </section>
+
+    <section id="lab" class="lab-section section-anchor">
+      <div class="wrap"><div class="section-heading"><span class="section-no">01 / 动手看数据</span><h2>同一个例子，两种取数视角。</h2><p>先看一个窗口如何展开，再看一次 TMA 如何固定核内偏移、跨窗口取数。</p></div>
+      <div class="lab-shell">
+        <div class="lab-toolbar"><div class="mode-switch" role="group" aria-label="取数视角"><button data-mode="window" class="active" aria-pressed="true">① 卷积窗口</button><button data-mode="tma" aria-pressed="false">② TMA 搬运</button></div><span class="model-label">NHWC · 普通 .im2col · 逻辑教学模型</span></div>
+        <div id="presets" class="presets" aria-label="教学场景"></div>
+        <div class="lab-intro" id="lab-intro" aria-live="polite"></div>
+        <details class="config-details"><summary>自定义输入、卷积参数 <span>改变一个参数，观察取数怎样变</span></summary><div class="config-grid" id="config-fields"></div><p class="fine-print">使用对称 padding、等宽高 stride / dilation、FP16 的 2 字节地址模型。输入值是教学标签，数值不表示实际图像。</p></details>
+        <div id="invalid" class="error-box" hidden role="alert"></div>
+        <div class="shape-bar" id="shape-bar"></div>
+        <div class="lab-content" id="lab-content">
+          <div class="control-row"><label>输出位置 m <select id="start-output"></select></label><label>核内位置 (r,s) <select id="kernel-offset"></select></label><label>起始通道 c₀ <select id="channel"></select></label><label class="tma-control" hidden>Pixels-per-Column <select id="pixel-count"><option>1</option><option>3</option><option selected>6</option><option>9</option><option>12</option></select></label><label class="tma-control" hidden>Channels-per-Pixel <select id="channel-count"></select></label></div>
+          <div class="visuals">
+            <article class="visual-panel input-panel"><div class="panel-heading"><div><span class="panel-kicker">GLOBAL MEMORY</span><h3>输入特征图 X</h3></div><span class="small-pill" id="input-slice"></span></div><div id="input-grid" class="input-grid" aria-label="输入特征图"></div><div class="legend"><span>◇ 当前窗口基准</span><span><i class="legend-box window-color"></i>窗口 / 本次位置</span><span><i class="legend-box selected-color"></i>当前取数</span><span><i class="legend-box pad-color"></i>padding</span></div><p id="input-caption" class="panel-caption"></p></article>
+            <article class="visual-panel matrix-panel"><div class="panel-heading"><div><span class="panel-kicker">LOGICAL MATRIX</span><h3>展开矩阵 A</h3></div><span class="small-pill" id="matrix-slice"></span></div><div class="matrix-scroller"><div id="matrix-grid" class="matrix-grid" aria-label="逻辑展开矩阵"></div></div><p id="matrix-caption" class="panel-caption"></p><div class="matrix-pages"><button id="matrix-prev" class="button compact">← 前 9 行</button><span id="matrix-page"></span><button id="matrix-next" class="button compact">后 9 行 →</button></div></article>
+          </div>
+          <div class="selection-readout" id="selection-readout" aria-live="polite"></div>
+          <div class="playback"><div class="playback-buttons"><button id="prev" class="button compact" aria-label="上一步">←</button><button id="play" class="button primary compact">播放取数</button><button id="next" class="button compact" aria-label="下一步">→</button></div><label class="step-slider"><span id="step-label"></span><input id="step" type="range" min="0" max="3" value="0" aria-label="取数步骤"></label><button id="restart" class="text-button">回到起点</button></div>
+          <div class="destination-panel"><div class="panel-heading"><div><span class="panel-kicker" id="destination-kicker"></span><h3 id="destination-title"></h3></div><span class="small-pill" id="destination-size"></span></div><div class="destination-grid" id="destination-grid"></div><p class="panel-caption" id="destination-caption"></p></div>
+          <details class="trace-details"><summary>展开地址追踪 <span>把图里的每一次取数，对应到一个地址</span></summary><div class="table-scroll"><table><thead><tr><th>序号</th><th>窗口基准 (n,h₀,w₀)</th><th>输入 (n,h,w,c)</th><th>源字节偏移</th><th>目标字节偏移</th><th>取到的值</th></tr></thead><tbody id="trace-body"></tbody></table></div><p class="fine-print">源基址设为 0；dense NHWC；无 interleave / swizzle。越界项不显示可读地址。本表展示元素级语义，不代表总线事务或周期时序。</p></details>
+          <details class="descriptor-details"><summary>查看本例的 TMA 参数 <span>描述符字段与每次指令参数分开理解</span></summary><div class="descriptor-split"><pre id="descriptor"></pre><div id="descriptor-explanation"></div></div><p class="fine-print">这些是语义参数，便于对照文档。小通道数用于教学；实际编码还需检查数据类型、地址/传输对齐、字段范围和目标架构限制。没有执行 GPU 指令。</p></details>
+        </div>
+      </div>
+      </div>
+    </section>
+
+    <section id="meaning" class="wrap section-anchor reading-section"><div class="section-heading"><span class="section-no">02 / 读懂 NVIDIA 的定义</span><h2>关键在于：什么固定，什么在遍历。</h2></div>
+      <div class="reading-grid"><article><span class="number-disc">1</span><h3>一次普通 im2col 请求，固定核内偏移。</h3><p>选定 (r,s)，把它转换成输入空间的偏移 (Δh,Δw)。然后遍历一串窗口基准位置，在每个位置读一段通道。下一次请求可以换偏移、换通道段，或换起始输出位置。</p><div class="code-note">SMEM[i,j] = X[nᵢ, h₀ᵢ+Δh, w₀ᵢ+Δw, c₀+j]</div><p class="fine-print">i 遍历 Pixels-per-Column；j 遍历 Channels-per-Pixel。越界时按本例设定补零。</p></article><article><span class="number-disc">2</span><h3>Bounding box 限定窗口基准位置的范围。</h3><p>它不是一个卷积核窗口的大小，也不是搬运元素数量。比如 4×4 输入配 2×2 核、无 padding，窗口左上角只能在 h₀,w₀ ∈ {0,1,2} 中移动。</p><div class="code-note">基准位置 + 核内偏移 → 实际输入位置</div><p>核内 offset 改变后，实际访问区域也随之平移。是否读到图像外，要用实际输入坐标再判断。</p></article></div>
+      <div class="parameter-table table-scroll"><table><thead><tr><th>文档字段</th><th>直观含义</th><th>最容易混淆的地方</th></tr></thead><tbody>
+        <tr><td>tensor coordinates</td><td>本次从哪个 batch、窗口基准位置、通道开始。</td><td>空间坐标是 filter base，不等于加完 offset 的取数坐标。</td></tr>
+        <tr><td>im2col offsets</td><td>当前取卷积窗口里的哪个相对位置。</td><td>dilation=2 时，核内 r=1 对应 Δh=2。</td></tr>
+        <tr><td>Pixels-per-Column</td><td>这次遍历多少个空间 / batch 位置。</td><td>不是 KH×KW；跨行、跨图像后仍继续计数。</td></tr>
+        <tr><td>Channels-per-Pixel</td><td>每个位置读取多长的通道段。</td><td>本次元素总数 = 位置数 × 通道数。</td></tr>
+        <tr><td>Traversal stride</td><td>窗口基准位置沿空间方向怎么前进。</td><td>与卷积 stride 对应；不负责决定核内 dilation。</td></tr>
+        <tr><td>Global strides</td><td>输入张量相邻维度的物理字节间隔。</td><td>这是地址步距，别和卷积步长混在一起。</td></tr>
+        <tr><td>Swizzle</td><td>调整共享存储的物理排布。</td><td>与 im2col 的“取哪些输入元素”是两层问题，本例关闭。</td></tr>
+      </tbody></table></div>
+      <div class="boundary-note"><div><span class="tag neutral">边界字段为什么会出现负数？</span><h3>Upper-Corner 是相对输入右 / 下端的偏移。</h3><p>它不是绝对坐标。例如 W=4，最右输入坐标为 3；若窗口基准最大 w₀=2，则 UpperCornerW = 2−3 = −1。Lower-Corner 则相对左 / 上端。</p></div><div class="boundary-formula"><code>LowerW = −pad_left</code><code>UpperW = pad_right − (S−1)×dilation_w</code><small>用于常规前向卷积、以左上角作为 filter base 的映射。stride 决定范围内哪些位置实际被访问。</small></div></div>
+      <div class="reading-grid"><article><h3>为什么没有“自动完成整个卷积”？</h3><p>TMA 负责数据移动。权重的加载、矩阵乘加、偏移和通道块循环、流水线同步仍由 kernel 组织。图中的完整 A 是逻辑上的矩阵，不要求真的先把它全部写入显存。</p></article><article><h3>省掉的究竟是什么？</h3><p>显式展开通常先写出一个大矩阵，再让 GEMM 读回来。按需展开可以直接准备当前 tile，省去完整中间矩阵的全局存储。输入重用和重复取数仍可能存在，速度取决于缓存、tile 和流水安排。</p></article></div>
+      <pre class="pipeline-code">for 每个输出位置块:
+    accumulator = 0
+    for 每个核内位置 (r, s):
+        for 每个输入通道块:
+            A_tile = TMA_im2col(起始位置, r, s, 通道块)
+            B_tile = load_weights(r, s, 通道块, 输出通道块)
+            等待相应数据可用
+            accumulator += A_tile × B_tile
+    写出当前输出块</pre>
+    </section>
+
+    <section id="project" class="project-section section-anchor"><div class="wrap"><div class="section-heading"><span class="section-no">03 / 放回我们的 TMA 项目</span><h2>新增 im2col，主要改变取数的组织方式。</h2><p>沿用项目熟悉的“描述符 → 地址生成 → 读返回 → 目标打包 → 完成”结构，逐段看需要什么。</p></div>
+      <div class="project-context"><div><span class="tag neutral">项目语境</span><p><strong>LD：</strong>LPDDR / L2 → L1 Buf<br><strong>CP：</strong>在资料限定的源 / 目标空间之间搬运、重排。</p></div><div><span class="tag green">NVIDIA 语境</span><p><strong>TMA im2col load：</strong>Global memory → Shared memory<br>两者可以类比数据流，不能直接把接口或存储语义视为相同。</p></div></div>
+      <p class="version-note">版本边界：本页参考现有项目手册中的模块划分，不宣称已经实现 im2col。不同资料中的布局、描述符位宽和折叠参数有变化，这里不把某个旧版本参数当成最终规格。项目 L1 Buf 指片上缓冲，不等于 NVIDIA L1 cache。</p>
+      <div class="stage-tabs" id="stage-tabs" role="group" aria-label="项目接入阶段"></div>
+      <div class="stage-detail" id="stage-detail" aria-live="polite"></div>
+      <div class="design-choices"><article><span class="tag neutral">方案 A · 软件分解</span><h3>先用现有搬运命令表达。</h3><p>软件生成多个窗口 / 行 / 通道段请求，复用现有搬运路径。适合先做功能验证，但指令数量、重复地址计算和边界命令可能增多；是否可行取决于现有指令能否表达所需访问。</p></article><article><span class="tag green">方案 B · 增加专用模式</span><h3>让硬件遍历窗口基准位置。</h3><p>用描述符给出范围、步长、通道段和像素数；命令给出起点和当前核偏移。硬件完成跨行、跨 batch、越界补零与输出序列组织。需要明确异常、资源占用和完成条件。</p></article></div>
+      <div class="question-strip"><h3>和 mentor 对齐时，把需求落到这四件事。</h3><ol><li>处理输入 activation，还是仍然只是 weight packing？</li><li>源在哪里、写到哪里；要支持哪些维度和数据类型？</li><li>谁循环核内偏移和通道块：软件还是硬件？</li><li>完成怎样定义：请求发完、数据返回，还是目标写入可见？</li></ol></div>
+    </div></section>
+
+    <section id="quiz" class="wrap section-anchor quiz-section"><div class="section-heading"><span class="section-no">04 / 检验理解</span><h2>能判断这几句话，就抓住了重点。</h2><p>每题选一个答案，反馈会解释原因。</p></div><div id="quiz-list" class="quiz-list"></div></section>
+    <section id="references" class="wrap references"><h2>继续对照原文</h2><div class="reference-links"><a href="https://docs.nvidia.com/cuda/parallel-thread-execution/#tensor-im2col-mode" target="_blank" rel="noreferrer"><b>01</b><span>PTX · im2col mode<small>访问语义、bounding box、stride、越界</small></span>↗</a><a href="https://docs.nvidia.com/cuda/cuda-driver-api/cuda_driver_api/group__CUDA__TENSOR__MEMORY.html" target="_blank" rel="noreferrer"><b>02</b><span>CUDA · Tensor Map API<small>描述符字段与实际编码限制</small></span>↗</a><a href="https://docs.nvidia.com/cutlass/latest/media/docs/cpp/implicit_gemm_convolution.html" target="_blank" rel="noreferrer"><b>03</b><span>CUTLASS · Implicit GEMM<small>卷积如何映射到矩阵乘法</small></span>↗</a><a href="https://andyzr-coder.github.io/cp-design-guide/" target="_blank" rel="noreferrer"><b>04</b><span>项目 · CP Design Guide<small>已有公开教学手册，需注意版本边界</small></span>↗</a></div><p class="fine-print">范围：普通 .im2col 的二维前向卷积 / 深度学习互相关视角。未模拟 .im2col::w、swizzle、cache、总线合并与周期精度；不代表 NVIDIA 的内部微架构。页面中标为“接入建议”的内容属于设计分析。</p></section>
+  </main>
+  <footer class="wrap"><a class="brand" href="#top">TMA <b>im2col</b> LAB</a><span>用可验证的坐标，理解数据怎样流动。</span><a href="https://github.com/andyzr-coder/tma-im2col-lab" target="_blank" rel="noreferrer">查看源码 ↗</a></footer>
+</body>
+</html>
