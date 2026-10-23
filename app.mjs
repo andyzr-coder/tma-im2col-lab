@@ -171,6 +171,7 @@ $('restart').onclick=()=>{stop();state.step=0;syncStep();state.page=Math.floor(s
 $('play').onclick=()=>{if(timer){stop();return;}if(state.step>=maxStep()){state.step=0;syncStep();render();}$('play').textContent='暂停';timer=setInterval(()=>{if(state.step>=maxStep()){stop();return;}advance(1);},850);};
 $('matrix-prev').onclick=()=>{state.page--;renderMatrix();};$('matrix-next').onclick=()=>{state.page++;renderMatrix();};
 document.addEventListener('visibilitychange',()=>{if(document.hidden)stop();});
+document.querySelectorAll('[data-start-lesson]').forEach(link=>link.addEventListener('click',()=>{state.mode='window';applyPreset('first');}));
 renderConfig();renderQuiz();render();
 // Read-only state snapshot for browser QA; all lesson computation is local.
 window.im2colLab={snapshot:()=>JSON.parse(JSON.stringify({...state,shape:shape(state.cfg),current:shape(state.cfg).M?current():null}))};

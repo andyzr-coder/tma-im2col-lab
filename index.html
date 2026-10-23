@@ -4,23 +4,38 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#f5f6f2">
-  <meta name="description" content="交互理解 NVIDIA TMA im2col：卷积滑窗、展开矩阵、地址生成、多通道、padding、stride、dilation，以及 TMA 项目接入思路。">
+  <meta name="description" content="从零认识 im2col：先用数字例子理解卷积窗口如何排成矩阵，再交互探索 NVIDIA TMA 的取数、地址生成和项目接入思路。">
   <title>TMA im2col Lab · 把取数过程看明白</title>
   <link rel="icon" href="./icon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="./styles.css">
-  <script type="module" src="./app.mjs"></script>
+  <link rel="stylesheet" href="./styles.css?v=intro-20261023">
+  <script type="module" src="./app.mjs?v=intro-20261023"></script>
 </head>
 <body>
   <a class="skip" href="#lab">跳到交互实验</a>
   <header class="site-header">
     <a class="brand" href="#top" aria-label="TMA im2col Lab 首页"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>TMA <b>im2col</b> <small>LAB</small></span></a>
-    <nav aria-label="章节导航"><a href="#lab">动手看数据</a><a href="#meaning">读懂参数</a><a href="#project">接入项目</a><a href="#quiz">检验理解</a></nav>
+    <nav aria-label="章节导航"><a href="#intro">先懂概念</a><a href="#lab">动手看数据</a><a href="#meaning">读懂参数</a><a href="#project">接入项目</a><a href="#quiz">检验理解</a></nav>
     <a class="source-link" href="https://github.com/andyzr-coder/tma-im2col-lab" target="_blank" rel="noreferrer">GitHub ↗</a>
   </header>
   <main id="top">
     <section class="hero wrap">
-      <div class="hero-copy"><p class="eyebrow"><span></span> 从卷积概念，到硬件取数</p><h1>看懂 im2col，<br>从<span>一个输入坐标</span>开始。</h1><p class="hero-lead">移动窗口，切换核内偏移，看输入像素怎样变成矩阵的一部分。再沿着地址、读请求和写入路径，理解 TMA 要新增什么。</p><div class="hero-actions"><a class="button primary" href="#lab">开始交互实验 <span>↓</span></a><a class="text-link" href="#distinction">先分清：它和权重重排的区别 →</a></div><p class="hero-note">中文教学 · 可单步演示 · 所有计算在浏览器本地完成</p></div>
-      <div class="hero-diagram" aria-label="窗口基准位置加核内偏移，得到输入坐标"><div class="diagram-label">一笔数据，是这样找到的</div><div class="formula-piece"><span class="tiny-label">窗口基准</span><strong>(h₀, w₀)</strong><span class="operator">+</span></div><div class="formula-piece offset"><span class="tiny-label">核内偏移</span><strong>(Δh, Δw)</strong><span class="operator">↓</span></div><div class="formula-result"><span>实际输入坐标</span><strong>(h₀ + Δh, w₀ + Δw)</strong></div><div class="mini-path"><span>GMEM</span><i>→</i><span>TMA im2col</span><i>→</i><span>Shared</span></div><p>同一偏移，应用到一串窗口基准位置。</p></div>
+      <div class="hero-copy"><p class="eyebrow"><span></span> 先知道是什么，再动手看数据</p><h1>im2col 是什么？<br>把卷积窗口，<span>排成矩阵。</span></h1><p class="hero-lead"><strong>im2col 是一种为卷积整理输入数据的方法：</strong>从输入图像中取出每个卷积窗口，把窗口里的数字按固定顺序展开，再组成矩阵。这样，卷积就可以用矩阵乘法来计算。</p><div class="hero-actions"><a class="button primary" href="#intro">先用一个例子读懂 <span>↓</span></a><a class="text-link" href="#lab">已了解，直接进入实验 →</a></div><p class="hero-note">认识概念 → 看数字例子 → 再理解 NVIDIA TMA 怎样取数</p></div>
+      <div class="hero-diagram intro-hero" aria-label="im2col 的三个步骤：取窗口、展开、组成矩阵"><div class="diagram-label">它做的是“整理数据”这一步</div><ol class="hero-steps"><li><span>1</span><div><strong>取出一个窗口</strong><p>窗口就是输入图像中的一小块区域。</p></div></li><li><span>2</span><div><strong>把窗口里的数字排成一行</strong><p>按约定顺序摆放，数值本身不变。</p></div></li><li><span>3</span><div><strong>所有窗口合起来，组成矩阵</strong><p>每一行，对应一个输出位置需要的输入。</p></div></li></ol><div class="hero-takeaway">随后再与权重做矩阵乘法，得到卷积结果。</div></div>
+    </section>
+
+    <section id="intro" class="beginner wrap section-anchor">
+      <div class="section-heading"><span class="section-no">从 0 开始 / 先看懂它在做什么</span><h2>一个小例子：把滑动的窗口，整理成一张表。</h2><p>先把图像理解为一张数字网格。卷积核是一张小的权重表；它每覆盖一个窗口，就将对应数字相乘再相加，得到一个输出值。窗口移动后，继续计算下一个值。</p></div>
+      <p class="intro-example-context">下面用 <b>4×4 输入、2×2 卷积核、每次移动 1 格、不补边界</b>。为了看清楚，先只看一个通道。</p>
+      <div class="intro-example">
+        <article class="intro-scene"><span class="intro-step">① 从输入里取窗口</span><h3>左上角的窗口，有 4 个数。</h3><div class="primer-image" role="img" aria-label="4乘4 输入，从1到16；第一个窗口包含1、2、5、6"><span class="marked">1</span><span class="marked">2</span><span>3</span><span>4</span><span class="marked">5</span><span class="marked">6</span><span>7</span><span>8</span><span>9</span><span>10</span><span>11</span><span>12</span><span>13</span><span>14</span><span>15</span><span>16</span></div><p>绿色区域是第一个窗口。向右移动一格，下一个窗口就包含 <b>2、3、6、7</b>。</p></article>
+        <article class="intro-scene"><span class="intro-step">② im2col：把窗口展开</span><h3>一个窗口，对应矩阵的一行。</h3><div class="primer-matrix" role="img" aria-label="展开矩阵的前三行：1 2 5 6；2 3 6 7；3 4 7 8"><div class="primer-row emphasized"><small>窗口 1</small><span>1</span><span>2</span><span>5</span><span>6</span></div><div class="primer-row"><small>窗口 2</small><span>2</span><span>3</span><span>6</span><span>7</span></div><div class="primer-row"><small>窗口 3</small><span>3</span><span>4</span><span>7</span><span>8</span></div><div class="primer-ellipsis">⋮</div><div class="primer-dimension">共 9 个窗口 → 9 行 × 4 列</div></div><p>先读窗口的第一行，再读第二行，排成 <b>[1, 2, 5, 6]</b>。对每个窗口都这样做，就得到展开矩阵。</p></article>
+        <article class="intro-scene"><span class="intro-step">③ 再计算卷积结果</span><h3>展开后的数字，仍然做同样的乘加。</h3><div class="primer-weight"><span>假设卷积核的权重是</span><div class="weight-grid" role="img" aria-label="卷积核权重第一行1 0，第二行0 1"><b>1</b><b>0</b><b>0</b><b>1</b></div><code>展开为 [1, 0, 0, 1]</code></div><div class="primer-result"><code>1×1 + 2×0 + 5×0 + 6×1</code><strong>= 7</strong></div><p>这就是第一个输出值。整个输入矩阵乘上同样展开的权重，就能计算所有窗口对应的输出。</p></article>
+      </div>
+      <div class="intro-keypoint"><strong>im2col 自己负责组织输入数据；乘法和加法是后面的计算。</strong><p>相邻窗口有重叠，所以 2、6 等输入会出现在矩阵的多行里。可以看到：它不仅是把维度的名字改掉，还改变了元素的取用关系。</p></div>
+      <p class="intro-naming"><b>名字怎么理解？</b>im2col 是 <i>image to column</i>，常译为“图像转列”。有些教材把一个窗口排成一列；本页把它排成一行，配合相应的权重矩阵，计算是等价的。先记住“按窗口展开”即可。</p>
+      <div class="intro-why"><article><h3>为什么要这么整理？</h3><p>这样可以把许多窗口的乘加统一表示为矩阵乘法，使用 GPU 上高效的矩阵计算单元。im2col 准备输入，权重也要按相同的顺序展开，两者才能一一对应。</p></article><article><h3>NVIDIA TMA 在这里做什么？</h3><p>完整展开矩阵可能很大。TMA 的 im2col 模式可以在搬运时，按卷积规则直接取出当前计算需要的一小片输入，放进共享存储，供后续计算使用。它负责准备数据，不负责算出卷积结果。</p></article></div>
+      <div class="intro-mission"><div><span class="tag green">接下来的交互，你要观察什么？</span><ol><li><b>先看“卷积窗口”：</b>一个窗口的数，怎样变成矩阵的一行。</li><li><b>再切到“TMA 搬运”：</b>固定窗口内的一个相对位置，怎样从多个窗口中取出对应的数。</li><li><b>最后试“边界补零”：</b>窗口走到图像外面时，哪些位置变成 0。</li></ol></div><a class="button primary" href="#lab" data-start-lesson>从最小例子开始 <span>→</span></a></div>
+      <p class="intro-source">概念依据：<a href="https://docs.nvidia.com/cutlass/latest/media/docs/cpp/implicit_gemm_convolution.html" target="_blank" rel="noreferrer">NVIDIA CUTLASS 卷积说明 ↗</a>。下面再对照权重重排，分清两侧的数据准备。</p>
     </section>
 
     <section id="distinction" class="distinction wrap section-anchor">
